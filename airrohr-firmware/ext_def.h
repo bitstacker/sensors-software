@@ -267,6 +267,9 @@ static const char MEASUREMENT_NAME_INFLUX[] PROGMEM = "feinstaub";
 #define BMP_READ 0
 #define BMP_API_PIN 3
 
+// BH1750, light sensor
+#define BH1750_READ 0
+
 // BMP280/BME280, temperature, pressure (humidity on BME280)
 #define BMX280_READ 1
 #define BMP280_API_PIN 3

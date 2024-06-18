@@ -58,7 +58,7 @@
 #include <pgmspace.h>
 
 // increment on change
-#define SOFTWARE_VERSION_STR "NRZ-2024-135"
+#define SOFTWARE_VERSION_STR "NRZ-2024-135-cust"
 String SOFTWARE_VERSION(SOFTWARE_VERSION_STR);
 
 /*****************************************************************
@@ -95,6 +95,7 @@ String SOFTWARE_VERSION(SOFTWARE_VERSION_STR);
 // includes common to ESP8266 and ESP32 (especially external libraries)
 #include "./oledfont.h" // avoids including the default Arial font, needs to be included before SSD1306.h
 #include <SSD1306.h>
+#include <BH1750.h>
 #include <SH1106.h>
 #include <LiquidCrystal_I2C.h>
 #define ARDUINOJSON_ENABLE_ARDUINO_STREAM 0
@@ -179,6 +180,7 @@ namespace cfg
 	char dnms_correction[LEN_DNMS_CORRECTION] = DNMS_CORRECTION;
 	bool gps_read = GPS_READ;
 	char temp_correction[LEN_TEMP_CORRECTION] = TEMP_CORRECTION;
+  bool bh1750_read = BH1750_READ;
 
 	// send to "APIs"
 	bool send2dusti = SEND2SENSORCOMMUNITY;
@@ -259,6 +261,7 @@ bool scd30_init_failed = false;
 bool dnms_init_failed = false;
 bool gps_init_failed = false;
 bool airrohr_selftest_failed = false;
+bool bh1750_init_failed = false;
 
 #if defined(ESP8266)
 ESP8266WebServer server(80);
@@ -351,6 +354,11 @@ DallasTemperature ds18b20(&oneWire);
  * SCD30 declaration                                             *
  *****************************************************************/
 SCD30 scd30;
+
+/*****************************************************************
+ * BH1750 declaration                                             *
+ *****************************************************************/
+BH1750 bh1750;
 
 /*****************************************************************
  * GPS declaration                                               *
@@ -461,6 +469,7 @@ float last_value_SHT3X_H = -1.0;
 float last_value_SCD30_T = -128.0;
 float last_value_SCD30_H = -1.0;
 uint16_t last_value_SCD30_CO2 = 0;
+float last_value_BH1750_L = -1.0;
 
 uint32_t sds_pm10_sum = 0;
 uint32_t sds_pm25_sum = 0;
@@ -1787,6 +1796,7 @@ static void webserver_config_send_body_get(String &page_content)
 	add_form_checkbox_sensor(Config_ips_read, FPSTR(INTL_IPS));
 	add_form_checkbox_sensor(Config_bmp_read, FPSTR(INTL_BMP180));
 	add_form_checkbox(Config_gps_read, FPSTR(INTL_NEO6M));
+	add_form_checkbox(Config_bh1750_read, F("BH1750"));
 
 	// Paginate page after ~ 1500 Bytes
 	server.sendContent(page_content);
@@ -2072,6 +2082,7 @@ static void webserver_values()
 	const String unit_Deg("°");
 	const String unit_P("hPa");
 	const String unit_T("°C");
+	const String unit_L("Lux");
 	const String unit_CO2("ppm");
 	const String unit_NC();
 	const String unit_LA(F("dB(A)"));
@@ -2204,6 +2215,11 @@ static void webserver_values()
 		add_table_t_value(FPSTR(SENSORS_BMP180), FPSTR(INTL_TEMPERATURE), last_value_BMP_T);
 		add_table_value(FPSTR(SENSORS_BMP180), FPSTR(INTL_PRESSURE), check_display_value(last_value_BMP_P / 100.0f, (-1 / 100.0f), 2, 0), unit_P);
 		add_table_value(FPSTR(SENSORS_BMP180), FPSTR(INTL_PRESSURE_AT_SEALEVEL), last_value_BMP_P != -1.0f ? String(pressure_at_sealevel(last_value_BMP_T, last_value_BMP_P / 100.0f), 2) : "-", unit_P);
+		page_content += FPSTR(EMPTY_ROW);
+	}
+	if (cfg::bh1750_read)
+	{
+		add_table_value(FPSTR(SENSORS_BH1750), F("Illuminance"), check_display_value(last_value_BH1750_L, -1, 2, 0), unit_L);
 		page_content += FPSTR(EMPTY_ROW);
 	}
 	if (cfg::bmx280_read)
@@ -3427,6 +3443,31 @@ static void fetchSensorBMX280(String &s)
 	debug_outln_info(FPSTR(DBG_TXT_SEP));
 	debug_outln_verbose(FPSTR(DBG_TXT_END_READING), FPSTR(sensor_name));
 }
+
+/*****************************************************************
+ * read BH1750 sensor values                              *
+ *****************************************************************/
+static void fetchSensorBH1750(String &s)
+{
+	const char *const sensor_name = SENSORS_BH1750;
+	debug_outln_verbose(FPSTR(DBG_TXT_START_READING), FPSTR(sensor_name));
+
+  const auto l = bh1750.readLightLevel();
+  bh1750.configure(BH1750::ONE_TIME_HIGH_RES_MODE);
+	if (isnan(l))
+	{
+		last_value_BH1750_L = -1.0;
+		debug_outln_error(F("BH1750 read failed"));
+	}
+	else
+	{
+		last_value_BH1750_L = l;
+		add_Value2Json(s, F("BH1750_illuminance"), FPSTR(DBG_TXT_PRESSURE), last_value_BH1750_L);
+	}
+	debug_outln_info(FPSTR(DBG_TXT_SEP));
+	debug_outln_verbose(FPSTR(DBG_TXT_END_READING), FPSTR(sensor_name));
+}
+
 
 /*****************************************************************
  * read DS18B20 sensor values                                    *
@@ -5418,6 +5459,27 @@ static bool initBMX280(char addr)
 	}
 }
 
+
+/*****************************************************************
+ * Init BH1750                                                   *
+ *****************************************************************/
+static void initBH1750()
+{
+	debug_out(F("Init BH1750 "), DEBUG_MIN_INFO);
+
+	if (bh1750.begin(BH1750::ONE_TIME_HIGH_RES_MODE))
+	{
+		debug_outln_info(FPSTR(DBG_TXT_FOUND));
+		return;
+	}
+	else
+	{
+		debug_outln_info(FPSTR(DBG_TXT_NOT_FOUND));
+    bh1750_init_failed = true;
+		return;
+	}
+}
+
 /*****************************************************************
    Init SPS30 PM Sensor
  *****************************************************************/
@@ -5656,6 +5718,15 @@ static void powerOnTestSensors()
 		if (!initBMX280(bmx280_default_i2c_address) && !initBMX280(bmx280_alternate_i2c_address)) {
 			debug_outln_error(F("Check BMx280 wiring"));
 			bmx280_init_failed = true;
+		}
+	}
+
+	if (cfg::bh1750_read)
+	{
+    initBH1750();
+		debug_outln_info(F("Read BH1750..."));
+		if (bh1750_init_failed) {
+			debug_outln_error(F("Check BH1750 wiring"));
 		}
 	}
 
@@ -6196,6 +6267,13 @@ void loop(void)
 			{
 				sum_send_time += sendSensorCommunity(result, BMP280_API_PIN, FPSTR(SENSORS_BMP280), "BMP280_");
 			}
+			result = emptyString;
+		}
+		if (cfg::bh1750_read && (!bh1750_init_failed))
+		{
+			// getting temperature, humidity and pressure (optional)
+			fetchSensorBH1750(result);
+			data += result;
 			result = emptyString;
 		}
 		if (cfg::sht3x_read && (!sht3x_init_failed))
